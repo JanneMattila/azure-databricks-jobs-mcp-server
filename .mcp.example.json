@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "databricks-jobs-local": {
+      "type": "http",
+      "url": "http://localhost:8000/mcp"
+    },
+    "databricks-jobs-azure": {
+      "type": "http",
+      "url": "https://databricks-jobs-mcp.abcdef123456.swedencentral.azurecontainerapps.io/mcp"
+    }
+  }
+}

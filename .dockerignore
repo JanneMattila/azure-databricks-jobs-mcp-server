@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Virtual environments
+.venv/
+venv/
+
+# Secrets and local config
+.env
+.env.*
+!.env.example
+
+# Version control / IDE
+.git/
+.gitignore
+.vscode/
+.idea/
+
+# Docs / build artifacts
+images/
+dist/
+build/
+*.md
+*.json

@@ -1,0 +1,21 @@
+# Python / uv
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+
+# Secrets & local config
+.env
+
+# Editor
+.idea/
+.vscode/
+
+# Deployment artifacts
+fic.json
+
+# MCP Configuration file
+.mcp.json
