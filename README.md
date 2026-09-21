@@ -206,10 +206,102 @@ to access this API's `jobs` scope in your tenant.
    - Assign only `Jobs.Read` for read-only access; assign both roles for reading
      and triggering runs. Azure resource IAM roles are not these Entra app roles.
 3. Provision the **MCP server's app-registration service principal**
-   (`AZURE_CLIENT_ID`) in the Databricks workspace. Grant read permissions on the
-   relevant jobs and **Can Run** only on jobs it should be able to trigger.
+   (`AZURE_CLIENT_ID`) in the Databricks workspace. Grant **Can View** on the
+   relevant jobs and **Can Manage Run** only on jobs it should be able to trigger.
    Provisioning the caller's identity or the server's federated managed identity
-   instead does not grant the outbound MCP app principal access.
+   instead does not grant the outbound MCP app principal access. Follow the
+   [Databricks access steps](#granting-databricks-access-for-app-only-authentication)
+   below.
+
+### Granting Databricks access for app-only authentication
+
+App-only access has two separate authorization boundaries:
+
+```text
+Caller service principal --MCP API app role--> MCP server
+MCP server service principal --workspace access + job permissions--> Databricks
+```
+
+| Identity | Required access |
+|----------|-----------------|
+| Caller used by `scripts/auth-app-only.ps1` (`-ClientId`) | MCP API application permission `Jobs.Read`, with admin consent; also `Jobs.Run` if triggering jobs |
+| MCP server app-registration service principal (`AZURE_CLIENT_ID`) | Membership in the target Databricks workspace and permissions on the relevant jobs |
+| Server's federated managed identity (`AZURE_MANAGED_IDENTITY_CLIENT_ID`) | Authenticates the MCP server app registration through its federated credential; it is **not** the Databricks caller in this implementation |
+
+#### 1. Identify the server application and workspace
+
+Use the deployed server's **`AZURE_CLIENT_ID`** and **`DATABRICKS_HOST`**, not the
+test caller's client ID:
+
+- Server application (client) ID: `<mcp-server-client-id>`.
+- Workspace: `https://<databricks-workspace-host>`.
+
+Substitute your deployment's settings. Databricks needs the
+**application/client ID**, not the Entra app-registration object ID or enterprise
+application object ID.
+
+#### 2. Add the server service principal to the workspace
+
+Sign in to the target Databricks workspace as a **workspace administrator**:
+
+1. Open **Settings > Identity and access**.
+2. Next to **Service principals**, select **Manage**, then **Add service principal**.
+3. If the principal already exists in the Databricks account, select it and add
+   it to this workspace. Otherwise, select **Add new**:
+   - **Management:** Microsoft Entra ID managed.
+   - **Application ID:** the server's `AZURE_CLIENT_ID`.
+   - **Name:** a recognizable name, such as `Azure Databricks MCP Server`.
+4. Confirm the service principal is **Active** and has the **Workspace access**
+   entitlement.
+
+If using the [Databricks account console](https://accounts.azuredatabricks.net)
+instead, add or select the Microsoft Entra ID managed principal under
+**User management > Service principals**, then assign it through
+**Workspaces > target workspace > Permissions > Add permissions**.
+Creating the principal at account level alone does not grant workspace access.
+
+See [Manage service principals](https://learn.microsoft.com/en-us/azure/databricks/admin/users-groups/manage-service-principals)
+for the workspace and account-console procedures.
+
+#### 3. Grant permissions on the relevant jobs
+
+As a job owner or administrator, open **Jobs & Pipelines**, select a job, open
+**Permissions**, and add the server service principal:
+
+| MCP operation | Databricks job permission |
+|---------------|---------------------------|
+| `list_jobs`, `list_runs`, `get_run`, `get_run_output` | **Can View** |
+| `run_now` | **Can Manage Run** |
+
+Start with **Can View** on one known job for the read-only test, then grant
+access to additional jobs as needed. Do not grant workspace administrator,
+job ownership, or unrestricted cluster creation just to read existing jobs.
+You do not need to change the job's **Run as** identity: permission to invoke an
+existing job is separate from the identity used to execute its tasks.
+
+Azure portal IAM roles such as Contributor and the caller's MCP `Jobs.Read`
+permission do **not** replace these Databricks permissions. Likewise, the
+delegated `AzureDatabricks/user_impersonation` API permission used for OBO does
+not grant the server service principal workspace or job access.
+
+See [Databricks job ACLs](https://learn.microsoft.com/en-us/azure/databricks/security/auth/access-control#job-acls).
+
+#### 4. Verify the app-only path
+
+Run the [PowerShell test](#testing-the-live-server-to-server-flow-with-powershell)
+again using the same **caller** credentials. These access changes normally do
+not require redeploying the Container App; allow a short time for propagation.
+
+- **Jobs returned:** workspace access and job permissions are working.
+- **Successful but empty job list:** check **Can View** on a known job in the
+  configured workspace.
+- **`Databricks API error 403: User not authorized`:** verify the server's exact
+  application ID, active status, workspace assignment, and Workspace access
+  entitlement, then check job permissions.
+
+MCP initialization and `tools/list` do not call Databricks. Seeing the tool names
+only confirms access to the MCP server; a successful `list_jobs` invocation
+tests the outbound client-credentials path.
 
 ### Obtaining a machine token
 
@@ -234,6 +326,62 @@ Protected Resource Metadata continues to advertise delegated scopes such as
 `api://<client_id>/jobs`; it does not assign machine roles or replace this
 onboarding. There is no Dynamic Client Registration or automatic machine login
 provided by this server.
+
+### Testing the live server-to-server flow with PowerShell
+
+[auth-app-only.ps1](scripts/auth-app-only.ps1) signs in as a **calling service principal**, requests a token
+for the MCP API, completes the MCP initialization handshake, lists the available
+tools, and calls **`list_jobs`** with a limit of five. It does not start Databricks
+jobs or change Azure resources or role assignments.
+
+Prerequisites:
+
+- PowerShell 7 and `Az.Accounts` 2.19.0 or newer.
+- A caller app registration with a client secret and the MCP API's **`Jobs.Read`**
+  application permission granted with admin consent, as described above.
+- The deployed server must support machine authentication, and its own
+  app-registration service principal must have
+  [Databricks workspace/job access](#granting-databricks-access-for-app-only-authentication).
+
+```powershell
+# Use the CALLER's application/client ID, not the MCP server's app ID.
+$authParameters = @{
+    ClientId = '<caller-application-id>'
+    TenantId = '<tenant-id>'
+    McpServerClientId = '<mcp-server-client-id>'
+    McpEndpoint = 'https://<container-app-fqdn>/mcp'
+}
+# The script prompts for the caller's secret as a SecureString.
+.\scripts\auth-app-only.ps1 @authParameters
+
+# Optionally provide a SecureString obtained from a prompt or secret store.
+$secret = Read-Host 'Caller client secret' -AsSecureString
+.\scripts\auth-app-only.ps1 @authParameters -ClientSecret $secret -Limit 10
+```
+
+`-ClientId`, `-TenantId`, `-McpServerClientId`, and `-McpEndpoint` are required.
+There are no environment-specific defaults; replace the placeholders with your
+own values.
+The token audience is **`api://<McpServerClientId>`**, not Databricks or ARM.
+The caller needs Entra app-role permissions, not an Azure subscription IAM role.
+
+Authentication runs in a separate PowerShell job with Az context autosave
+disabled, leaving your existing CLI and PowerShell logins unchanged. Secrets and
+tokens are not printed or written to files. Both JSON and SSE MCP responses are
+supported, including session IDs and the negotiated protocol version. The script
+attempts to close the MCP session on exit.
+
+Success prints the tool result, which can contain live job metadata; handle it
+accordingly. HTTP authentication failures, JSON-RPC errors, and MCP tool errors
+terminate the script. An empty jobs list can be a successful call. A successful
+handshake alone does **not** establish that the server-to-Databricks
+client-credentials flow works; the `list_jobs` call tests that path.
+
+The mocked tests do not sign in or contact Azure and require Pester 5:
+
+```powershell
+Invoke-Pester -Path .\tests\auth-app-only.Tests.ps1
+```
 
 ## Setup
 
@@ -317,12 +465,12 @@ separately when enabling machine callers.
 
 ```bash
 # 0. Variables
-RG=rg-databricks-mcp
-LOCATION=swedencentral
-ACR=acrdatabricksmcp...           # must be globally unique
-ENV=cae-databricks-mcp
-APP=databricks-jobs-mcp
-UAMI=id-databricks-mcp
+RG="<resource-group-name>"
+LOCATION="<azure-region>"
+ACR="<unique-registry-name>"     # must be globally unique
+ENV="<container-app-environment-name>"
+APP="<container-app-name>"
+UAMI="<managed-identity-name>"
 CLIENT_ID=<client-id>            # App REGISTRATION client ID (= AZURE_CLIENT_ID), NOT the managed identity
 TENANT_ID=<tenant-id>            # Entra tenant (directory) ID
 
@@ -384,12 +532,12 @@ The same, in PowerShell:
 
 ```powershell
 # 0. Variables
-$RG        = "rg-databricks-mcp"
-$LOCATION  = "swedencentral"
-$ACR       = "acrdatabricksmcp..."          # must be globally unique
-$ENVNAME   = "cae-databricks-mcp"
-$APP       = "databricks-jobs-mcp"
-$UAMI      = "id-databricks-mcp"
+$RG        = "<resource-group-name>"
+$LOCATION  = "<azure-region>"
+$ACR       = "<unique-registry-name>"     # must be globally unique
+$ENVNAME   = "<container-app-environment-name>"
+$APP       = "<container-app-name>"
+$UAMI      = "<managed-identity-name>"
 $TENANT_ID = "<tenant-id>"   # Entra tenant (directory) ID
 $CLIENT_ID = "<client-id>"   # App REGISTRATION client ID (= AZURE_CLIENT_ID), NOT the managed identity
 
@@ -465,7 +613,7 @@ After deploying:
 - For machine callers, the app-registration SP needs workspace/job permissions
   in Databricks, and callers need the MCP API's app roles. The federated managed
   identity does not become the Databricks caller.
-- `https://databricks-jobs-mcp.abcdef123456.swedencentral.azurecontainerapps.io/.well-known/oauth-protected-resource/mcp`
+- `https://<container-app-fqdn>/.well-known/oauth-protected-resource/mcp`
   is the Protected Resource Metadata endpoint (RFC 9728). Copilot uses it
   to learn this server's resource identifier, the authorization server (Entra) to obtain
   tokens from, and the scope to request.
@@ -474,7 +622,7 @@ Here is an example of the metadata document returned by the deployed server:
 
 ```json
 {
-  "resource": "https://databricks-jobs-mcp.abcdef123456.swedencentral.azurecontainerapps.io/mcp",
+  "resource": "https://<container-app-fqdn>/mcp",
   "authorization_servers": [
     "https://login.microsoftonline.com/<tenant-id>/v2.0"
   ],
@@ -495,7 +643,7 @@ To use that in Copilot, you can use the following `.mcp.json`:
   "mcpServers": {
     "databricks-jobs-azure": {
       "type": "http",
-      "url": "https://databricks-jobs-mcp.abcdef123456.swedencentral.azurecontainerapps.io/mcp"
+      "url": "https://<container-app-fqdn>/mcp"
     }
   }
 }
@@ -588,6 +736,8 @@ Common causes when calling from **Microsoft Foundry**:
 - **Databricks denies access** — verify the identity used by the selected path:
   the signed-in user for OBO, or the MCP app-registration SP for machine calls.
   An MCP role assignment does not itself grant Databricks workspace/job access.
+  For app-only `403: User not authorized` errors, follow
+  [Granting Databricks access for app-only authentication](#granting-databricks-access-for-app-only-authentication).
 
 Turn debug logging back off once diagnosed:
 

@@ -1,0 +1,179 @@
+{
+  "RetrievedAtUtc": "2026-09-21T07:37:46.4766173+00:00",
+  "WindowStartUtc": "2026-09-20T19:37:45.2604407+00:00",
+  "IsFailed": true,
+  "Run": {
+    "job_id": 147707759567325,
+    "run_id": 93295905930437,
+    "creator_user_name": "admin@demo.onmicrosoft.com",
+    "number_in_job": 93295905930437,
+    "original_attempt_run_id": 93295905930437,
+    "state": {
+      "life_cycle_state": "INTERNAL_ERROR",
+      "result_state": "FAILED",
+      "state_message": "Task sql failed with message: Workload failed, see run output for details.",
+      "user_cancelled_or_timedout": false
+    },
+    "start_time": 1789976234260,
+    "setup_duration": 0,
+    "execution_duration": 18000,
+    "cleanup_duration": 0,
+    "end_time": 1789976252973,
+    "run_duration": 18713,
+    "trigger": "ONE_TIME",
+    "run_name": "Important job 123",
+    "run_page_url": "https://adb-12345678.9.azuredatabricks.net/?o=7405614931438257#job/147707759567325/run/93295905930437",
+    "run_type": "JOB_RUN",
+    "tasks": [
+      {
+        "run_id": 304011019367829,
+        "task_key": "sql",
+        "run_if": "ALL_SUCCESS",
+        "sql_task": {
+          "query": {
+            "query_id": "077955c0-559b-40b7-9de9-4673a1122ff8"
+          },
+          "warehouse_id": "66f59eb72cc34b66"
+        },
+        "state": {
+          "life_cycle_state": "TERMINATED",
+          "result_state": "FAILED",
+          "state_message": "Workload failed, see run output for details",
+          "user_cancelled_or_timedout": false
+        },
+        "run_page_url": "https://adb-12345678.9.azuredatabricks.net/?o=7405614931438257#job/147707759567325/run/304011019367829",
+        "start_time": 1789976234285,
+        "setup_duration": 0,
+        "execution_duration": 18000,
+        "cleanup_duration": 0,
+        "end_time": 1789976252739,
+        "attempt_number": 0,
+        "status": {
+          "state": "TERMINATED",
+          "termination_details": {
+            "code": "RUN_EXECUTION_ERROR",
+            "type": "CLIENT_ERROR",
+            "message": "Workload failed, see run output for details"
+          }
+        },
+        "effective_performance_target": "PERFORMANCE_OPTIMIZED"
+      }
+    ],
+    "format": "MULTI_TASK",
+    "status": {
+      "state": "TERMINATED",
+      "termination_details": {
+        "code": "RUN_EXECUTION_ERROR",
+        "type": "CLIENT_ERROR",
+        "message": "Task sql failed with message: Workload failed, see run output for details."
+      }
+    },
+    "job_run_id": 93295905930437,
+    "effective_performance_target": "PERFORMANCE_OPTIMIZED"
+  },
+  "RunDetails": {
+    "job_id": 147707759567325,
+    "run_id": 93295905930437,
+    "creator_user_name": "admin@demo.onmicrosoft.com",
+    "number_in_job": 93295905930437,
+    "original_attempt_run_id": 93295905930437,
+    "state": {
+      "life_cycle_state": "INTERNAL_ERROR",
+      "result_state": "FAILED",
+      "state_message": "Task sql failed with message: Workload failed, see run output for details.",
+      "user_cancelled_or_timedout": false
+    },
+    "start_time": 1789976234260,
+    "setup_duration": 0,
+    "execution_duration": 18000,
+    "cleanup_duration": 0,
+    "end_time": 1789976252973,
+    "run_duration": 18713,
+    "trigger": "ONE_TIME",
+    "run_name": "Important job 123",
+    "run_page_url": "https://adb-12345678.9.azuredatabricks.net/?o=7405614931438257#job/147707759567325/run/93295905930437",
+    "run_type": "JOB_RUN",
+    "tasks": [
+      {
+        "run_id": 304011019367829,
+        "task_key": "sql",
+        "run_if": "ALL_SUCCESS",
+        "sql_task": {
+          "query": {
+            "query_id": "077955c0-559b-40b7-9de9-4673a1122ff8"
+          },
+          "warehouse_id": "66f59eb72cc34b66"
+        },
+        "state": {
+          "life_cycle_state": "TERMINATED",
+          "result_state": "FAILED",
+          "state_message": "Workload failed, see run output for details",
+          "user_cancelled_or_timedout": false
+        },
+        "run_page_url": "https://adb-12345678.9.azuredatabricks.net/?o=7405614931438257#job/147707759567325/run/304011019367829",
+        "start_time": 1789976234285,
+        "setup_duration": 0,
+        "execution_duration": 18000,
+        "cleanup_duration": 0,
+        "end_time": 1789976252739,
+        "attempt_number": 0,
+        "status": {
+          "state": "TERMINATED",
+          "termination_details": {
+            "code": "RUN_EXECUTION_ERROR",
+            "type": "CLIENT_ERROR",
+            "message": "Workload failed, see run output for details"
+          }
+        },
+        "effective_performance_target": "PERFORMANCE_OPTIMIZED"
+      }
+    ],
+    "format": "MULTI_TASK",
+    "status": {
+      "state": "TERMINATED",
+      "termination_details": {
+        "code": "RUN_EXECUTION_ERROR",
+        "type": "CLIENT_ERROR",
+        "message": "Task sql failed with message: Workload failed, see run output for details."
+      }
+    },
+    "job_run_id": 93295905930437,
+    "effective_performance_target": "PERFORMANCE_OPTIMIZED"
+  },
+  "JobDetails": {
+    "job_id": 147707759567325,
+    "creator_user_name": "admin@demo.onmicrosoft.com",
+    "run_as_user_name": "admin@demo.onmicrosoft.com",
+    "run_as_owner": true,
+    "settings": {
+      "name": "Important job 123",
+      "email_notifications": {
+        "no_alert_for_skipped_runs": false
+      },
+      "webhook_notifications": {},
+      "timeout_seconds": 0,
+      "max_concurrent_runs": 1,
+      "tasks": [
+        {
+          "task_key": "sql",
+          "run_if": "ALL_SUCCESS",
+          "sql_task": {
+            "query": {
+              "query_id": "077955c0-559b-40b7-9de9-4673a1122ff8"
+            },
+            "warehouse_id": "66f59eb72cc34b66"
+          },
+          "timeout_seconds": 0,
+          "email_notifications": {},
+          "disabled": false
+        }
+      ],
+      "format": "MULTI_TASK",
+      "queue": {
+        "enabled": true
+      },
+      "performance_target": "PERFORMANCE_OPTIMIZED"
+    },
+    "created_time": 1782121021227
+  }
+}
