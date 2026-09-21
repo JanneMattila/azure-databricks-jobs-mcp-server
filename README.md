@@ -97,8 +97,9 @@ permissions.
 ### Server credential: client secret or managed identity
 
 Token *validation* needs no secret — the server only fetches Entra's public
-JWKS. Both the **On-Behalf-Of exchange** and **client-credentials token acquisition**
-require the server to act as a **confidential client** and prove the app's identity.
+JWKS. In this implementation, both the **On-Behalf-Of exchange** and
+**client-credentials token acquisition** use the app registration as a
+**confidential client**, so the server must prove that app's identity.
 There are two ways to do that:
 
 - **Client secret** — set `AZURE_CLIENT_SECRET`. Simplest for local
@@ -110,18 +111,51 @@ There are two ways to do that:
   [Deploying to Azure Container Apps](#deploying-to-azure-container-apps).
 
 > **Why both an app registration and a managed identity?**
-> The managed identity replaces the **client secret**, not the app registration —
-> they do different jobs:
+> In this implementation, the managed identity replaces the **client secret**,
+> not the app registration — they do different jobs:
 > - The **app registration** exposes the API/scopes and machine app roles, and
 >   holds the delegated **`user_impersonation`** permission that makes the OBO ("act as the user")
 >   exchange possible. It also identifies the shared SP used for machine calls to
 >   Databricks. Managed identities cannot expose this API or perform OBO themselves.
-> - The **managed identity** is just a secretless way to prove the app registration's
+> - The **managed identity** is used as a secretless way to prove the app registration's
 >   identity during either outbound flow (via the federated credential).
 >
 > So you can drop the secret, but not the app registration in this implementation.
 > A machine caller's managed identity is separate from the identity used to
 > authenticate the server's outbound token requests.
+
+### Alternative: calling Databricks directly with managed identity
+
+Azure Databricks also supports **direct managed-identity authentication**. For a
+machine-only outbound request, the server could obtain a Databricks-audience token
+using its own managed identity and call the Jobs API as that identity. This
+connection does **not** require a separate app registration, client secret, or
+federated identity credential.
+
+The managed identity must be assigned to the Databricks workspace and granted
+the required job permissions. A managed identity is backed by an Entra service
+principal, and Databricks treats it as a service principal; no **separate**
+app-registration service principal is needed for this outbound connection. See
+[Authenticate with Azure managed identities](https://learn.microsoft.com/en-us/azure/databricks/dev-tools/auth/azure-mi).
+
+| Outbound machine flow | Identity Databricks sees | Federated identity credential |
+|-----------------------|-------------------------|-------------------------------|
+| Current managed-identity mode: identity authenticates the app registration | MCP app-registration SP | Required |
+| Alternative: identity obtains a Databricks token directly | Server's managed identity | Not required |
+
+These outbound choices are separate from **caller-to-MCP authentication**. This
+server's app registration also exposes the MCP API's scopes and app roles and
+identifies its accepted token audience. It supports the delegated user/OBO path
+as well. Using direct managed identity for machine calls would not remove those
+inbound API and OBO requirements.
+
+**Direct managed identity for Databricks is not currently implemented here.**
+`AZURE_USE_MANAGED_IDENTITY=true` selects federated authentication of the app
+registration, not direct Databricks access. Adopting the alternative would require
+changing the outbound machine token acquisition and granting Databricks permissions
+to the managed identity instead of relying on the app-registration SP's grants.
+It would still use one shared outbound identity for all machine callers, not
+preserve each calling machine's identity.
 
 ## Prerequisites
 
