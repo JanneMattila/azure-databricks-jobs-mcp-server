@@ -6,29 +6,44 @@
 
 A Python [MCP](https://modelcontextprotocol.io) server that exposes a **limited**
 set of Azure Databricks **Jobs** capabilities. It authenticates callers with
-**Microsoft Entra ID** and uses the **On-Behalf-Of (OBO)** flow so that, when used
-from **GitHub Copilot in VS Code** (or any other client), every Databricks call is made **as the
-signed-in user** (their Databricks permissions apply).
+**Microsoft Entra ID** and supports two authentication paths:
+
+- **Users**, including **GitHub Copilot in VS Code**, call Databricks **as the
+  signed-in user** through the **On-Behalf-Of (OBO)** flow. Their Databricks
+  permissions apply.
+- **Machines** (service principals or managed identities) call without an
+  interactive user. The server uses **client credentials** to call Databricks
+  **as the MCP server's app-registration service principal**.
+
+This enables unattended clients to inspect job status, retrieve outputs, and
+optionally trigger runs. Scheduling, polling, and analysis remain the client's
+responsibility.
 
 Built with [FastMCP](https://gofastmcp.com) and managed with [uv](https://docs.astral.sh/uv/).
 
 ## Tools
 
-| Tool | Databricks endpoint | Description |
-|------|---------------------|-------------|
-| `list_jobs` | `GET /api/2.2/jobs/list` | List jobs (helps discover job IDs). |
-| `list_runs` | `GET /api/2.2/jobs/runs/list` | List job runs, filter by job / state. |
-| `get_run` | `GET /api/2.2/jobs/runs/get` | Get details/status of a run. |
-| `get_run_output` | `GET /api/2.2/jobs/runs/get-output` | Get a task run's output. |
-| `run_now` | `POST /api/2.2/jobs/run-now` | Trigger a new run of a job. |
+| Tool | Databricks endpoint | Description | Required machine app role |
+|------|---------------------|-------------|---------------------------|
+| `list_jobs` | `GET /api/2.2/jobs/list` | List jobs (helps discover job IDs). | `Jobs.Read` |
+| `list_runs` | `GET /api/2.2/jobs/runs/list` | List job runs, filter by job / state. | `Jobs.Read` |
+| `get_run` | `GET /api/2.2/jobs/runs/get` | Get details/status of a run. | `Jobs.Read` |
+| `get_run_output` | `GET /api/2.2/jobs/runs/get-output` | Get a task run's output. | `Jobs.Read` |
+| `run_now` | `POST /api/2.2/jobs/run-now` | Trigger a new run of a job. | `Jobs.Run` |
 
 Only these jobs-related tools are exposed — no other Databricks capabilities.
+The role names above are defaults and can be configured. `Jobs.Run` alone permits
+`run_now`; it does not grant read access. Assign both roles when a machine must
+trigger runs and inspect their results. Delegated users do not need these app
+roles; their required API scopes and Databricks permissions apply instead.
 
 ## How authentication works
 
 This server is an **OAuth 2.0 protected resource** ([RFC 9728](https://www.rfc-editor.org/rfc/rfc9728)).
 It does not run any login UI of its own — it validates the bearer tokens it receives
 and tells clients which authorization server (Entra) issues them.
+
+### Delegated users (OBO)
 
 ```
 VS Code Copilot  --OAuth-->  Microsoft Entra ID  --token-->  Copilot  --Bearer-->  MCP server  --OBO-->  Databricks
@@ -47,11 +62,44 @@ VS Code Copilot  --OAuth-->  Microsoft Entra ID  --token-->  Copilot  --Bearer--
    scope `2ff814a6-3304-4ab8-85cb-cd0e6f879c1d/.default` (the Azure Databricks resource).
 5. The resulting token is used as `Authorization: Bearer` against the Jobs API.
 
+### Machines (app-only)
+
+```text
+SP / managed identity --Entra token for MCP API--> MCP server
+  MCP server --client credentials--> Entra --Databricks token--> Jobs API
+                                                     (acts as MCP server SP)
+```
+
+1. The caller obtains an app-only token for **this MCP API**, with assigned app
+   roles in the `roles` claim, and sends it as a bearer token to `/mcp`.
+2. The server validates the JWT against Entra's JWKS, issuer, and accepted
+   audiences (`api://<client_id>` or `<client_id>`). Its central gate accepts
+   tokens carrying **all** configured delegated scopes or **at least one**
+   recognized app role. Tokens satisfying neither condition are rejected.
+3. A caller is treated as a machine when `idtyp` is `app`, or when it has roles
+   but no delegated `scp`/`scope`. Each tool checks its specific machine role
+   before acquiring a Databricks token or calling the Jobs API.
+4. For an authorized machine caller, MSAL acquires a Databricks token through
+   client credentials using the **server's** app registration and existing
+   credential. MSAL caches the token internally. App-only tokens never use OBO,
+   and the inbound token is never forwarded to Databricks.
+
+There is **no feature flag** for machine access and no role is assigned by default.
+Control access through app-role assignments and the server principal's Databricks
+permissions.
+
+> **Shared Databricks identity:** all machine callers act as the MCP server's
+> app-registration service principal, not as the calling SP or managed identity.
+> Databricks audit logs therefore attribute these requests to the MCP server SP.
+> Grant that principal only the job permissions it needs. Per-machine-caller
+> Databricks identities are not supported.
+
 ### Server credential: client secret or managed identity
 
-Token *validation* (step 3) needs no secret — the server only fetches Entra's public
-JWKS. The **On-Behalf-Of exchange** (step 4) is where the server acts as a
-**confidential client** and must prove the app's identity. There are two ways to do that:
+Token *validation* needs no secret — the server only fetches Entra's public
+JWKS. Both the **On-Behalf-Of exchange** and **client-credentials token acquisition**
+require the server to act as a **confidential client** and prove the app's identity.
+There are two ways to do that:
 
 - **Client secret** — set `AZURE_CLIENT_SECRET`. Simplest for local
   development.
@@ -64,20 +112,22 @@ JWKS. The **On-Behalf-Of exchange** (step 4) is where the server acts as a
 > **Why both an app registration and a managed identity?**
 > The managed identity replaces the **client secret**, not the app registration —
 > they do different jobs:
-> - The **app registration** exposes the API/scopes and holds the delegated
->   **`user_impersonation`** permission that makes the OBO ("act as the user")
->   exchange possible. Managed identities can do none of these — they only get tokens
->   *for themselves* (app-only), never *on behalf of a user*.
+> - The **app registration** exposes the API/scopes and machine app roles, and
+>   holds the delegated **`user_impersonation`** permission that makes the OBO ("act as the user")
+>   exchange possible. It also identifies the shared SP used for machine calls to
+>   Databricks. Managed identities cannot expose this API or perform OBO themselves.
 > - The **managed identity** is just a secretless way to prove the app registration's
->   identity during the OBO exchange (via the federated credential).
+>   identity during either outbound flow (via the federated credential).
 >
-> So you can drop the secret, but not the app registration — unless you give up
-> per-user access and call Databricks as a single shared service principal instead.
+> So you can drop the secret, but not the app registration in this implementation.
+> A machine caller's managed identity is separate from the identity used to
+> authenticate the server's outbound token requests.
 
 ## Prerequisites
 
 - Python 3.12+ and [uv](https://docs.astral.sh/uv/)
-- An Azure Databricks workspace, and a user with access to it
+- An Azure Databricks workspace, with access granted to users for OBO and/or the
+  MCP server's app-registration service principal for machine calls
 - An Entra app registration (see below)
 
 ## Entra app registration requirements
@@ -88,12 +138,12 @@ JWKS. The **On-Behalf-Of exchange** (step 4) is where the server acts as a
    - Application ID URI: keep the default `api://<client_id>`.
    - Add a scope, e.g. `jobs` (matches `MCP_REQUIRED_SCOPES`).
 2. **Certificates & secrets** → create a **client secret** (store it in `.env`),
-   or use a **managed identity** when deployed (see below). This credential is used
-   only for the OBO exchange.
-3. **API permissions** → add **AzureDatabricks → `user_impersonation`** (Delegated),
+   or use a **managed identity** when deployed (see below). Both outbound
+   authentication paths reuse this credential.
+3. For delegated user access, **API permissions** → add **AzureDatabricks → `user_impersonation`** (Delegated),
    then **Grant admin consent**. This permission lets the OBO exchange succeed.
 
-### Client access to the API
+### Delegated client access to the API
 
 Because clients authenticate **directly with Entra** (which has no Dynamic Client
 Registration), the MCP client needs to be a client Entra recognizes and must be
@@ -101,6 +151,55 @@ allowed to request the `api://<client_id>/jobs` scope. In VS Code, Copilot perfo
 the Entra sign-in when you first use a tool and requests the scope advertised in the
 Protected Resource Metadata. Ensure user (or admin) consent is granted for the client
 to access this API's `jobs` scope in your tenant.
+
+### Machine client access to the API
+
+1. On the **MCP server's app registration**, create enabled **App roles** with
+   **Allowed member types = Applications** (`allowedMemberTypes: ["Application"]`):
+   - Value `Jobs.Read` for the read tools.
+   - Value `Jobs.Run` for `run_now`.
+   - If you customize the role values, set the matching
+     `MCP_MACHINE_READ_ROLE` / `MCP_MACHINE_RUN_ROLE` environment variables.
+2. Grant roles to the **calling** principal:
+   - For an app-registration caller, add the MCP API's **Application permissions**
+     under the caller's **API permissions**, select the appropriate roles, and
+     **Grant admin consent**.
+   - For a managed-identity caller, an administrator assigns the roles to its
+     service principal through Microsoft Graph `appRoleAssignments`. The
+     assignment's resource is the **MCP API's enterprise application/service
+     principal**, not the Databricks service principal. See Microsoft's
+     [managed-identity app-role assignment guide](https://learn.microsoft.com/en-us/entra/identity/managed-identities-azure-resources/how-to-assign-app-role-managed-identity).
+   - Assign only `Jobs.Read` for read-only access; assign both roles for reading
+     and triggering runs. Azure resource IAM roles are not these Entra app roles.
+3. Provision the **MCP server's app-registration service principal**
+   (`AZURE_CLIENT_ID`) in the Databricks workspace. Grant read permissions on the
+   relevant jobs and **Can Run** only on jobs it should be able to trigger.
+   Provisioning the caller's identity or the server's federated managed identity
+   instead does not grant the outbound MCP app principal access.
+
+### Obtaining a machine token
+
+Use the caller's credentials with the tenant's Entra v2 token endpoint
+(`https://login.microsoftonline.com/<tenant-id>/oauth2/v2.0/token`), the
+`client_credentials` grant, and scope **`api://<mcp-server-client-id>/.default`**.
+A managed-identity caller uses its Azure identity token API for that same MCP API
+resource (or the `/.default` scope when using a scope-based SDK).
+
+Configure the MCP client to attach the resulting token as
+`Authorization: Bearer <access-token>` when connecting to `/mcp`, and to refresh
+it before expiry. Do not send a token for Databricks, Microsoft Graph, or
+`api://AzureADTokenExchange` to the MCP endpoint. The latter audience is used only
+for the server's federated credential.
+
+The token must have the configured tenant's **v2 issuer**, an accepted MCP API
+audience, and the assigned roles. Configure the MCP API app registration's
+`api.requestedAccessTokenVersion` to `2` to request v2 access tokens; using the
+v2 token endpoint alone does not determine the access-token version.
+
+Protected Resource Metadata continues to advertise delegated scopes such as
+`api://<client_id>/jobs`; it does not assign machine roles or replace this
+onboarding. There is no Dynamic Client Registration or automatic machine login
+provided by this server.
 
 ## Setup
 
@@ -124,15 +223,17 @@ The server listens on `http://127.0.0.1:8000/mcp` by default.
 | `AZURE_TENANT_ID` | yes | Entra tenant (directory) ID. |
 | `AZURE_CLIENT_ID` | yes | App registration (client) ID. |
 | `AZURE_CLIENT_SECRET` | conditional | App registration client secret. Required unless `AZURE_USE_MANAGED_IDENTITY=true`. |
-| `AZURE_USE_MANAGED_IDENTITY` | no (`false`) | Authenticate the OBO exchange with a managed identity federated credential instead of a secret. |
+| `AZURE_USE_MANAGED_IDENTITY` | no (`false`) | Authenticate both outbound token flows with a managed identity federated credential instead of a secret. |
 | `AZURE_MANAGED_IDENTITY_CLIENT_ID` | no | Client ID of the user-assigned managed identity. Omit for the system-assigned identity. |
 | `MCP_BASE_URL` | no (`http://localhost:8000`) | Public base URL; published as the resource identifier in Protected Resource Metadata. On Azure Container Apps it is auto-derived by combining the injected `CONTAINER_APP_NAME` and `CONTAINER_APP_ENV_DNS_SUFFIX` when left unset. |
 | `MCP_HOST` | no (`127.0.0.1`) | Bind interface. |
 | `MCP_PORT` | no (`8000`) | Bind port. |
-| `MCP_REQUIRED_SCOPES` | no (`jobs`) | Exposed API scope name(s), comma separated. |
+| `MCP_REQUIRED_SCOPES` | no (`jobs`) | Required delegated API scope name(s), comma separated. All must be present for scope-based acceptance; machine callers use app roles instead. |
+| `MCP_MACHINE_READ_ROLE` | no (`Jobs.Read`) | App-role value required for machine callers of `list_jobs`, `list_runs`, `get_run`, and `get_run_output`. Must match the Entra role value. |
+| `MCP_MACHINE_RUN_ROLE` | no (`Jobs.Run`) | App-role value required for machine callers of `run_now`. Does not imply read access. Must match the Entra role value. |
 | `DATABRICKS_HOST` | yes | Workspace URL, e.g. `https://adb-xxxx.azuredatabricks.net`. |
 | `DATABRICKS_API_VERSION` | no (`2.2`) | Jobs API version (use `2.1` only if needed). |
-| `LOG_LEVEL` | no (`INFO`) | Logging verbosity (`DEBUG`, `INFO`, `WARNING`, `ERROR`). Set to `DEBUG` to log the exact reason a token is rejected (issuer/audience/scope mismatch, signature/JWKS failures). |
+| `LOG_LEVEL` | no (`INFO`) | Logging verbosity (`DEBUG`, `INFO`, `WARNING`, `ERROR`). Set to `DEBUG` to log why a token is rejected (issuer/audience mismatch, missing scopes/roles, signature/JWKS failures). |
 
 Secrets live **only** in `.env` (gitignored).
 
@@ -175,6 +276,10 @@ docker run --rm -p 8000:8000 --env-file .env databricks-jobs-mcp:latest
 The app authenticates to Entra with a **managed identity** — no client secret is
 stored or rotated. It uses a **federated identity credential (FIC)**: a user-assigned
 managed identity mints a short-lived assertion that Entra trusts in place of a secret.
+This credential supports both outbound flows. The deployment commands below do
+not create app roles, assign caller permissions, or provision the app-registration
+SP in Databricks; complete [machine onboarding](#machine-client-access-to-the-api)
+separately when enabling machine callers.
 
 ```bash
 # 0. Variables
@@ -315,14 +420,17 @@ After deploying:
   (`CONTAINER_APP_NAME` + `CONTAINER_APP_ENV_DNS_SUFFIX`),
   so you don't need to set it. (To override the URL, e.g. a custom domain, set
   `MCP_BASE_URL` explicitly.)
-- **No `AZURE_CLIENT_SECRET` is needed.** The OBO exchange uses the FIC instead.
+- **No `AZURE_CLIENT_SECRET` is needed.** Both outbound token flows use the FIC instead.
 - `AZURE_MANAGED_IDENTITY_CLIENT_ID` selects the user-assigned identity. Omit it only
   if you use the Container App's system-assigned identity (and set the FIC subject to that
   identity's principal ID instead).
 - Token validation is **stateless**, so the app scales to multiple replicas without
   extra configuration.
-- The app registration still needs the **AzureDatabricks → `user_impersonation`**
-  permission, which powers the OBO exchange.
+- For delegated users, the app registration still needs the
+  **AzureDatabricks → `user_impersonation`** permission, which powers the OBO exchange.
+- For machine callers, the app-registration SP needs workspace/job permissions
+  in Databricks, and callers need the MCP API's app roles. The federated managed
+  identity does not become the Databricks caller.
 - `https://databricks-jobs-mcp.abcdef123456.swedencentral.azurecontainerapps.io/.well-known/oauth-protected-resource/mcp`
   is the Protected Resource Metadata endpoint (RFC 9728). Copilot uses it
   to learn this server's resource identifier, the authorization server (Entra) to obtain
@@ -363,22 +471,25 @@ To use that in Copilot, you can use the following `.mcp.json`:
 ## Notes
 
 - Inspired by the (stdio-based) [databricks-solutions/ai-dev-kit](https://github.com/databricks-solutions/ai-dev-kit);
-  this server is intentionally HTTP + OBO and jobs-only.
+  this server is intentionally HTTP and jobs-only, with user OBO and machine
+  client-credentials authentication.
 
 ## Troubleshooting authentication (401 `invalid_token`)
 
 A `401 Unauthorized` with `{"error": "invalid_token"}` means the server rejected the
-bearer token during JWT validation (signature, issuer, audience or required scope) —
-it never reached a tool, so the OBO exchange is not involved yet. By default the logs
+bearer token during JWT validation or the central scope/role gate —
+it never reached a tool, so neither outbound token flow is involved yet. By default the logs
 only show the generic `Auth error returned: invalid_token`. Set **`LOG_LEVEL=DEBUG`**
 to make FastMCP's `JWTVerifier` log the precise reason:
 
-- **Issuer / audience / scope mismatch** is logged at `WARNING`, e.g.
+- **Issuer / audience mismatch** is logged at `WARNING`, e.g.
   `Bearer token rejected ... audience mismatch (got ..., expected ...)`.
 - **Signature / JWKS / format** failures are logged at `DEBUG`, e.g.
   `Token validation failed: JWT signature/format invalid`.
+- **Neither all required scopes nor any known app role** is logged by this
+  server at `DEBUG`, with the required and received scope/role values.
 
-When a token is rejected, the server also logs (at `DEBUG`) a decoded — but
+When the base JWT verifier rejects a token, the server also logs (at `DEBUG`) a decoded — but
 **unverified** — summary of the offending token so you can see the actual claims
 without capturing the bearer token by hand:
 
@@ -398,8 +509,9 @@ Auth config: base_url=... issuer=... audiences=[...] required_scopes=[...] jwks_
 > - **`nonce=PRESENT`** → the client obtained a **nonce-protected** Microsoft token
 >   (issued when the token's `aud` is a Microsoft first-party resource, not this API).
 >   These are intentionally **not** validatable by third parties. The client must
->   request a token for **this** API (`api://<client_id>/jobs`), as advertised in the
->   Protected Resource Metadata — not for Microsoft Graph or another resource.
+>   request a token for **this** API (`api://<client_id>/jobs` for users, or
+>   `api://<client_id>/.default` for client credentials), not for Microsoft Graph
+>   or another resource.
 > - **`not a well-formed JWS`** → the client sent an opaque/garbled token, not a JWT.
 
 Enable it on the deployed Container App (this restarts the revision):
@@ -413,21 +525,61 @@ az containerapp logs show -n $APP -g $RG --follow
 Common causes when calling from **Microsoft Foundry**:
 
 - **Audience mismatch** — Foundry obtained a token whose `aud` is not this app
-  (`api://<client_id>` / `<client_id>`). The metadata at
+  (`api://<client_id>` / `<client_id>`). For delegated clients, the metadata at
   `/.well-known/oauth-protected-resource/mcp` must advertise this server's resource and
   the `api://<client_id>/jobs` scope so the client requests a token for *this* API.
+  For machine clients, configure the MCP API resource as described in
+  [Obtaining a machine token](#obtaining-a-machine-token).
 - **Issuer mismatch** — the token must be a **v2.0** token
   (`https://login.microsoftonline.com/<tenant-id>/v2.0`).
-- **Missing scope** — the token lacks the required `jobs` scope (`MCP_REQUIRED_SCOPES`).
+- **Missing scopes/roles** — a delegated client normally needs all configured
+  `MCP_REQUIRED_SCOPES` (default `jobs`). An app-only caller instead needs at least
+  one recognized role in `roles` (`Jobs.Read` or `Jobs.Run` by default).
 - **Wrong base URL** — if `MCP_BASE_URL` does not match the public FQDN, clients may
   request a token for the wrong resource. On Container Apps it is auto-derived; override
   only for custom domains.
 
-Turn it back off once diagnosed:
+### Tool authorization and outbound failures
+
+- **Missing tool role** — an app-only token can pass the inbound gate but fail a
+  tool call with `Caller is missing the required app role '...'`. For example,
+  `Jobs.Read` does not allow `run_now`, and `Jobs.Run` does not allow read tools.
+  This is a tool authorization error, not an inbound `401 invalid_token`.
+  No Databricks request is made for that call.
+- **Role assignments recently changed** — obtain a fresh caller token and check
+  its roles. Managed-identity token caching can delay visibility of assignments.
+- **Client-credentials token acquisition failed** — check the MCP server's
+  app-registration credential or federated credential, not just the caller's
+  credentials. The machine path does not use OBO.
+- **Databricks denies access** — verify the identity used by the selected path:
+  the signed-in user for OBO, or the MCP app-registration SP for machine calls.
+  An MCP role assignment does not itself grant Databricks workspace/job access.
+
+Turn debug logging back off once diagnosed:
 
 ```bash
 az containerapp update -n $APP -g $RG --set-env-vars LOG_LEVEL=INFO
 ```
+
+## Authentication verification checklist
+
+These are recommended regression checks, not a record of completed verification.
+The repository currently has no automated authentication tests.
+
+- Verify delegated tokens with all required scopes are accepted and all five
+  tools still use OBO and the user's Databricks permissions.
+- Verify app-only tokens with a known role are accepted, and tokens with neither
+  required scopes nor recognized roles are rejected.
+- Verify machine detection for `idtyp=app` and roles-only tokens, and delegated
+  detection for scope-only tokens.
+- With `Jobs.Read` only, verify all four read tools succeed and `run_now` is
+  blocked before any Databricks call.
+- With `Jobs.Run` only, verify `run_now` is authorized but read tools are blocked.
+  Use a designated test job: this check triggers a real run.
+- With both roles, verify reading and triggering runs work, and Databricks
+  attributes machine requests to the MCP app-registration SP.
+- Verify configured custom role names and both server credential options
+  (client secret and managed-identity federation) in the intended environment.
 
 ## Example responses
 

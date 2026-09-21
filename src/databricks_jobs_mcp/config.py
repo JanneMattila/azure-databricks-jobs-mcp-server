@@ -51,6 +51,14 @@ class Settings(BaseSettings):
         default_factory=lambda: ["jobs"],
         description="Custom API scope name(s) exposed by the app registration (comma separated).",
     )
+    mcp_machine_read_role: str = Field(
+        default="Jobs.Read",
+        description="App role required for machine (app-only) callers to use the read tools.",
+    )
+    mcp_machine_run_role: str = Field(
+        default="Jobs.Run",
+        description="App role required for machine (app-only) callers to trigger job runs.",
+    )
 
     # --- Diagnostics ---
     log_level: str = Field(
@@ -161,6 +169,11 @@ class Settings(BaseSettings):
     def supported_scopes(self) -> list[str]:
         """Fully-qualified scopes clients request, advertised in resource metadata."""
         return [f"{self.identifier_uri}/{scope}" for scope in self.mcp_required_scopes]
+
+    @property
+    def known_app_roles(self) -> list[str]:
+        """App roles recognized for machine (app-only) callers."""
+        return [self.mcp_machine_read_role, self.mcp_machine_run_role]
 
     @property
     def databricks_jobs_base(self) -> str:

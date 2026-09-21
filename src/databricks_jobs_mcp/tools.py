@@ -1,8 +1,11 @@
 """MCP tool definitions for Azure Databricks Jobs.
 
-Each tool reads the inbound user token from the request context, exchanges it
-for a Databricks token via the On-Behalf-Of flow, and calls the Jobs API as the
-signed-in user.
+Each tool authorizes the inbound token and obtains a Databricks token. For a
+delegated (user) caller the inbound token is exchanged via the On-Behalf-Of flow
+and the Jobs API is called *as the signed-in user*. For a machine (app-only)
+caller the tool verifies the required app role and mints a fresh Databricks token
+via the client-credentials flow, acting *as the MCP server's own service
+principal*.
 """
 
 from __future__ import annotations
@@ -14,37 +17,67 @@ from fastmcp.server.dependencies import get_access_token
 from pydantic import Field
 
 from .auth import DatabricksTokenProvider, OboError
+from .config import Settings
 from .databricks_client import DatabricksApiError, DatabricksJobsClient
 
 
-def _user_assertion() -> str:
-    """Return the raw inbound user JWT, used as the OBO assertion."""
-    token = get_access_token()
-    if token is None or not token.token:
-        raise OboError("Request is not authenticated; no user token present.")
-    return token.token
+class AuthorizationError(RuntimeError):
+    """Raised when an authenticated caller lacks the required app role."""
+
+
+def _principal_is_app(claims: dict[str, Any]) -> bool:
+    """Return True when the token represents a machine (app-only) principal.
+
+    A token is machine when ``idtyp == "app"``, or when it carries ``roles`` but
+    no ``scp``/``scope`` (delegated) claim.
+    """
+    if claims.get("idtyp") == "app":
+        return True
+    has_scope = bool(claims.get("scp")) or bool(claims.get("scope"))
+    has_roles = bool(claims.get("roles"))
+    return has_roles and not has_scope
 
 
 def register_tools(
     mcp: FastMCP,
     token_provider: DatabricksTokenProvider,
     client: DatabricksJobsClient,
+    settings: Settings,
 ) -> None:
     """Register the Databricks Jobs tools on the given FastMCP instance."""
 
-    async def _databricks_token() -> str:
-        return token_provider.token_for_user(_user_assertion())
+    async def _authorize(required_app_role: str) -> str:
+        """Authorize the current caller and return a Databricks access token.
+
+        Delegated callers are exchanged via OBO (acting as the user). Machine
+        callers must carry ``required_app_role`` and receive a fresh
+        client-credentials token (acting as the MCP server's own SP).
+        """
+        token = get_access_token()
+        if token is None or not token.token:
+            raise OboError("Request is not authenticated; no user token present.")
+
+        claims = token.claims or {}
+        if not _principal_is_app(claims):
+            return token_provider.token_for_user(token.token)
+
+        roles = claims.get("roles") or []
+        if required_app_role not in roles:
+            raise AuthorizationError(
+                f"Caller is missing the required app role '{required_app_role}'."
+            )
+        return token_provider.token_for_service_principal()
 
     @mcp.tool(
-        annotations={"readOnlyHint": True, "title": "List Databricks jobs"},
+        annotations={"readOnlyHint": True, "title": "List Databricks jobs"}
     )
     async def list_jobs(
         limit: Annotated[int, Field(ge=1, le=100, description="Max jobs to return.")] = 20,
         offset: Annotated[int | None, Field(ge=0, description="Number of jobs to skip.")] = None,
         name: Annotated[str | None, Field(description="Filter by exact job name.")] = None,
     ) -> dict[str, Any]:
-        """List jobs defined in the Databricks workspace, as the signed-in user."""
-        token = await _databricks_token()
+        """List workspace jobs as the signed-in user or, for machines, the MCP server SP."""
+        token = await _authorize(settings.mcp_machine_read_role)
         return await client.list_jobs(token, limit=limit, offset=offset, name=name)
 
     @mcp.tool(
@@ -58,7 +91,7 @@ def register_tools(
         offset: Annotated[int | None, Field(ge=0, description="Number of runs to skip.")] = None,
     ) -> dict[str, Any]:
         """List job runs, optionally filtered by job and run state."""
-        token = await _databricks_token()
+        token = await _authorize(settings.mcp_machine_read_role)
         return await client.list_runs(
             token,
             job_id=job_id,
@@ -78,7 +111,7 @@ def register_tools(
         ] = None,
     ) -> dict[str, Any]:
         """Get metadata and status for a single job run."""
-        token = await _databricks_token()
+        token = await _authorize(settings.mcp_machine_read_role)
         return await client.get_run(token, run_id=run_id, include_history=include_history)
 
     @mcp.tool(
@@ -102,7 +135,7 @@ def register_tools(
         Pass the run_id of an individual task, not the parent job run. For a
         multi-task run, call get_run first to obtain the per-task run_ids.
         """
-        token = await _databricks_token()
+        token = await _authorize(settings.mcp_machine_read_role)
         return await client.get_run_output(token, run_id=run_id)
 
     @mcp.tool(
@@ -128,7 +161,7 @@ def register_tools(
         ] = None,
     ) -> dict[str, Any]:
         """Trigger a new run of an existing job and return its run_id."""
-        token = await _databricks_token()
+        token = await _authorize(settings.mcp_machine_run_role)
         return await client.run_now(
             token,
             job_id=job_id,

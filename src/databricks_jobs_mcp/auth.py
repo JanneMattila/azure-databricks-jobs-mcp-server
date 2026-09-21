@@ -1,8 +1,8 @@
-"""Entra ID On-Behalf-Of (OBO) token exchange for Azure Databricks.
+"""Entra ID token acquisition for Azure Databricks.
 
-The MCP server receives a user token (audience = this app's API) from the MCP
-client. To call Databricks *as the user*, that token is exchanged via the OAuth2
-On-Behalf-Of flow for a token scoped to the Azure Databricks resource.
+Delegated callers use On-Behalf-Of (OBO) to call Databricks as the user.
+Machine callers use client credentials to call as the MCP server's own
+app-registration service principal, never by forwarding the inbound token.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ import msal
 from .config import Settings
 
 # Azure Databricks first-party application (resource) ID. The ``/.default`` scope
-# requests a Databricks-audience access token for the signed-in user.
+# requests a Databricks-audience access token for the selected authentication flow.
 AZURE_DATABRICKS_RESOURCE_ID = "2ff814a6-3304-4ab8-85cb-cd0e6f879c1d"
 DATABRICKS_SCOPE = f"{AZURE_DATABRICKS_RESOURCE_ID}/.default"
 
@@ -25,7 +25,7 @@ ENTRA_TOKEN_EXCHANGE_SCOPE = "api://AzureADTokenExchange/.default"
 
 
 class OboError(RuntimeError):
-    """Raised when the On-Behalf-Of token exchange fails."""
+    """Raised when authentication or either Databricks token acquisition flow fails."""
 
 
 def build_managed_identity_assertion(settings: Settings) -> Callable[[], str]:
@@ -53,11 +53,10 @@ def build_managed_identity_assertion(settings: Settings) -> Callable[[], str]:
 
 
 class DatabricksTokenProvider:
-    """Exchanges inbound user tokens for Databricks tokens using MSAL OBO.
+    """Acquires Databricks tokens using MSAL OBO or client credentials.
 
     A single MSAL ``ConfidentialClientApplication`` is reused so that MSAL's
-    in-memory token cache can serve repeated requests for the same user without
-    hitting Entra every time.
+    in-memory token cache can serve repeated user or server-SP token requests.
     """
 
     def __init__(self, settings: Settings) -> None:
@@ -102,5 +101,26 @@ class DatabricksTokenProvider:
             error = result.get("error", "unknown_error")
             description = result.get("error_description", "")
             raise OboError(f"OBO token exchange failed: {error}: {description}")
+
+        return result["access_token"]
+
+    def token_for_service_principal(self) -> str:
+        """Return a Databricks access token minted for this server's own SP.
+
+        Used by the machine (app-only) path: the inbound app-only token has no
+        user principal, so instead of an OBO exchange a fresh Databricks-audience
+        token is acquired via the client-credentials flow. MSAL caches the app
+        token internally, so repeated calls are cheap.
+        """
+        with self._lock:
+            app = self._get_app()
+            result = app.acquire_token_for_client(scopes=[DATABRICKS_SCOPE])
+
+        if "access_token" not in result:
+            error = result.get("error", "unknown_error")
+            description = result.get("error_description", "")
+            raise OboError(
+                f"Client-credentials token acquisition failed: {error}: {description}"
+            )
 
         return result["access_token"]

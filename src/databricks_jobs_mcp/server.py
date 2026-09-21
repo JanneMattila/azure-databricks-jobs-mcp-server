@@ -77,19 +77,73 @@ def _unverified_token_summary(token: str) -> str:
 
 
 class DiagnosticJWTVerifier(JWTVerifier):
-    """``JWTVerifier`` that logs why a rejected token failed, at DEBUG level.
+    """``JWTVerifier`` that gates on scopes/roles and logs rejections at DEBUG.
 
-    Verification behaviour is unchanged; on a rejection it additionally decodes
-    the (already-rejected) token's header and claims without verifying the
-    signature and logs the salient fields, so a 401 can be diagnosed from the
-    container logs without capturing the bearer token by hand.
+    Signature/issuer/audience validation is delegated to the base verifier
+    (constructed with ``required_scopes=None`` so app-only tokens are not
+    auto-rejected for a missing ``scp``). This override then applies the central
+    inbound gate: a token is accepted only if it carries **all** required
+    delegated scopes *or* **at least one** known app role. On a rejection it
+    additionally decodes the (already-rejected) token's header and claims without
+    verifying the signature and logs the salient fields, so a 401 can be
+    diagnosed from the container logs without capturing the bearer token by hand.
     """
+
+    def __init__(self, *args: object, settings: Settings, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+        self._settings = settings
+
+    @staticmethod
+    def _token_scopes(claims: dict[str, object]) -> set[str]:
+        """Return the set of delegated scopes carried by ``claims`` (scp/scope)."""
+        raw = claims.get("scp")
+        if raw is None:
+            raw = claims.get("scope")
+        if isinstance(raw, str):
+            return {s for s in raw.split() if s}
+        if isinstance(raw, (list, tuple)):
+            return {str(s) for s in raw}
+        return set()
+
+    @staticmethod
+    def _token_roles(claims: dict[str, object]) -> set[str]:
+        """Return the set of app roles carried by ``claims`` (roles)."""
+        raw = claims.get("roles")
+        if isinstance(raw, (list, tuple)):
+            return {str(r) for r in raw}
+        if isinstance(raw, str):
+            return {raw} if raw else set()
+        return set()
 
     async def verify_token(self, token: str) -> AccessToken | None:
         result = await super().verify_token(token)
-        if result is None and logger.isEnabledFor(logging.DEBUG):
-            logger.debug("Rejected bearer token: %s", _unverified_token_summary(token))
-        return result
+        if result is None:
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug("Rejected bearer token: %s", _unverified_token_summary(token))
+            return None
+
+        claims = result.claims or {}
+        scopes = self._token_scopes(claims)
+        roles = self._token_roles(claims)
+        required_scopes = set(self._settings.mcp_required_scopes)
+        known_roles = set(self._settings.known_app_roles)
+
+        delegated_ok = bool(required_scopes) and required_scopes.issubset(scopes)
+        machine_ok = bool(roles & known_roles)
+
+        if delegated_ok or machine_ok:
+            return result
+
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "Rejected authenticated token: no required scope %s and no known "
+                "app role %s (scp=%s roles=%s)",
+                sorted(required_scopes),
+                sorted(known_roles),
+                sorted(scopes),
+                sorted(roles),
+            )
+        return None
 
 
 def configure_diagnostics(settings: Settings) -> None:
@@ -128,12 +182,15 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     )
 
     # Validate inbound access tokens against Entra's published signing keys.
+    # ``required_scopes=None`` so app-only tokens (which carry ``roles`` but no
+    # ``scp``) are not auto-rejected; the scope/role gate lives in the override.
     token_verifier = DiagnosticJWTVerifier(
         jwks_uri=settings.entra_jwks_uri,
         issuer=settings.entra_issuer,
         audience=settings.token_audiences,
         algorithm="RS256",
-        required_scopes=settings.mcp_required_scopes,
+        required_scopes=None,
+        settings=settings,
     )
 
     # Advertise this server as a protected resource and point clients at Entra
@@ -150,7 +207,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
 
     token_provider = DatabricksTokenProvider(settings)
     client = DatabricksJobsClient(settings)
-    register_tools(mcp, token_provider, client)
+    register_tools(mcp, token_provider, client, settings)
 
     return mcp
 
